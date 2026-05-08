@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use or reference this research, please cite it as below."
+title: "SunnyDayBPF: Post-Syscall User-Buffer Telemetry Deception with eBPF"
+type: software
+authors:
+  - family-names: "Daştan"
+    given-names: "Azizcan"
+    website: "https://www.linkedin.com/in/azqzazq"
+abstract: "SunnyDayBPF is an eBPF-based post-syscall user-buffer telemetry deception research technique originally proposed and researched by Azizcan Daştan. The technique investigates whether data observed by user-space security or logging agents can be altered after read-like syscall completion, creating a mismatch between actual system behavior and observed telemetry."
+keywords:
+  - eBPF
+  - Linux security
+  - telemetry deception
+  - post-syscall manipulation
+  - user-buffer manipulation
+  - red teaming
+  - detection engineering
+  - observation-layer deception
+  - SIEM
+  - EDR
+  - security telemetry
+license: MIT
+repository-code: "https://github.com/azqzazq1/SunnyDayBPF"
+url: "https://github.com/azqzazq1/SunnyDayBPF"
+date-released: "2026-05-08"
+version: "0.1.0"
+preferred-citation:
+  type: article
+  title: "SunnyDayBPF: Post-Syscall User-Buffer Telemetry Deception with eBPF"
+  authors:
+    - family-names: "Daştan"
+      given-names: "Azizcan"
+      website: "https://www.linkedin.com/in/azqzazq"
+  year: 2026
+  url: "https://github.com/azqzazq1/SunnyDayBPF"
