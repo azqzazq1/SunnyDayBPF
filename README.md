@@ -538,3 +538,8 @@ See `LICENSE` for details.
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20089617.svg)](https://doi.org/10.5281/zenodo.20089617)
 
 </div>
+
+## Articles
+
+- Medium: [MEDIUM](https://medium.com/@azizcan.dastan5/a-new-red-team-technique-telemetry-visibility-gaps-in-runtime-memory-based-detection-pipelines-5f4e73442703)
+- Dev.to: [DEV.TO](https://dev.to/azqzazq1/sunnydaybpf-post-syscall-user-buffer-telemetry-deception-with-ebpf-3p7d)
