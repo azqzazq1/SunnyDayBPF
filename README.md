@@ -532,3 +532,9 @@ BibTeX-style citation:
 This research repository is released for educational and defensive security research purposes.
 
 See `LICENSE` for details.
+
+<div align="center">
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20089617.svg)](https://doi.org/10.5281/zenodo.20089617)
+
+</div>
